@@ -128,6 +128,11 @@ var readyToInitGPS bool //TODO: replace with channel control to terminate gorout
 
 var Satellites map[string]SatelliteInfo
 
+// DWD - NMEA serial out
+var nmeaOutPort *serial.Port
+var usingPUBX bool
+
+
 /*
 u-blox5_Referenzmanual.pdf
 Platform settings
@@ -193,6 +198,9 @@ func initGPSSerial() bool {
 	var device string
 	baudrate := int(9600)
 	isSirfIV := bool(false)
+
+	// DWD - NMEA serial out
+	usingPUBX = false // default to false
 	globalStatus.GPS_detected_type = 0 // reset detected type on each initialization
 
 	if _, err := os.Stat("/dev/ublox9"); err == nil { // u-blox 8 (RY83xAI over USB).
@@ -337,7 +345,9 @@ func initGPSSerial() bool {
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GLL disabled
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GSA disabled
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GSV disabled
-		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // RMC
+		// DWD - NMEA serial out
+		//p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // RMC
+		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01})) // RMC - DWD enable RMC messages
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // VGT
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})) // GRS
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})) // GST
@@ -895,6 +905,9 @@ func processNMEALine(l string) (sentenceUsed bool) {
 			if len(x) < 20 {
 				return false
 			}
+			// DWD - NMEA serial out
+			// if we are receiving PUBX Position fixes we will not process contents of GPRMC messages
+			usingPUBX = true
 
 			// set the global GPS type to UBX as soon as we see our first (valid length)
 			// PUBX,01 position message, even if we don't have a fix
@@ -1303,6 +1316,16 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		if len(x) < 15 {
 			return false
 		}
+		// DWD - NMEA serial out
+		// forward to serial port
+		if nmeaOutPort != nil {
+			n, err := nmeaOutPort.Write([]byte(l + "\r\n"))
+			if n == 0 || err != nil {
+				log.Printf("Can't write to nmea port")
+				nmeaOutPort.Close()
+				nmeaOutPort = nil
+			}
+		}
 
 		// use RMC / GGA message detection to sense "NMEA" type.
 		if (globalStatus.GPS_detected_type & 0xf0) == 0 {
@@ -1427,6 +1450,21 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		*/
 		if len(x) < 11 {
 			return false
+		}
+		
+		// DWD - NMEA serial out
+		// only send to serial port twice a second. Look for ".00" or ".050" at the end of the timestamp.
+		if (strings.HasSuffix(x[1], ".00")  || strings.HasSuffix(x[1], ".50") ) &&  nmeaOutPort != nil {
+			n, err := nmeaOutPort.Write([]byte(l + "\r\n"))
+			if n == 0 || err != nil {
+				log.Printf("Can't write to nmea port")
+				nmeaOutPort.Close()
+				nmeaOutPort = nil
+			}
+		}
+		// if we are receiving PUBX messages we should ignore GPRMC content		
+		if usingPUBX {
+			return true
 		}
 
 		// use RMC / GGA message detection to sense "NMEA" type.
@@ -2135,6 +2173,16 @@ func pollGPS() {
 
 func initGPS() {
 	Satellites = make(map[string]SatelliteInfo)
+
+	// DWD - NMEA serial out
+	c := &serial.Config{Name: "/dev/ttyUSB0", Baud: 9600}
+	s, err := serial.OpenPort(c)
+	if err != nil {
+        	log.Printf("Can't open /dev/ttyUSB0 for NMEA out")
+	} else {
+		log.Printf("Opened /dev/ttyUSB0 for NMEA out")
+	}
+	nmeaOutPort = s
 
 	go pollGPS()
 }
