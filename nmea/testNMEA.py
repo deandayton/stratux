@@ -16,6 +16,8 @@
 
 import time
 from datetime import datetime
+import serial
+
 
 
 
@@ -64,6 +66,16 @@ xtrkLR = 'L'
 range2wpt = '040.0'
 tbearing2wpt = '270.0'
 
+ser = serial.Serial(
+    port='/dev/ttyUSB1', 
+    baudrate=9600, 
+    timeout=1,
+    parity=serial.PARITY_NONE,
+    stopbits=serial.STOPBITS_ONE,
+    bytesize=serial.EIGHTBITS
+)
+
+
 for x in range(60):
 	now = datetime.now().time() # time object
 	#now = datetime.datetime.now()  
@@ -79,5 +91,10 @@ for x in range(60):
 	print gga
 	print rmc
 	print rmb
+
+	ser.write(gga + "\r\n")
+	ser.write(rmc +"\r\n")
+	ser.write(rmb + "\r\n")
+
 
 	time.sleep(1)
