@@ -11,7 +11,7 @@ package main
 
 import (
 	"fmt"
-	"net"
+	//"net"
 	"log"
 	"math"
 	"strconv"
@@ -22,6 +22,8 @@ import (
 	"bufio"
 
 	"github.com/tarm/serial"
+	"github.com/westphae/geomag/pkg/egm96"
+	"github.com/westphae/geomag/pkg/wmm"
 
 	"os"
 	"os/exec"
@@ -99,6 +101,11 @@ type SituationData struct {
 	AHRSGLoadMax         float64
 	AHRSLastAttitudeTime time.Time
 	AHRSStatus           uint8
+	
+	// DWD - gather info required to calualte magnetic variation
+	GPSDate string  // stash the date as a string - obtained from PUBX 0 
+	mv string            // magnetic variation to be used in GPRMC 
+	mvEW string      // E or W
 }
 
 /*
@@ -130,8 +137,8 @@ var readyToInitGPS bool //TODO: replace with channel control to terminate gorout
 var Satellites map[string]SatelliteInfo
 
 // DWD - NMEA serial out 
-//	var nmeaOutPort *serial.Port 
-var nmeaOutConn net.Conn
+var nmeaOutPort *serial.Port 
+//var nmeaOutConn net.Conn
 var usingPUBX bool
 
 
@@ -348,8 +355,8 @@ func initGPSSerial() bool {
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GSA disabled
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GSV disabled
 		// DWD - NMEA serial out
-		//p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // RMC
-		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01})) // RMC - DWD enable RMC messages
+		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // RMC
+		//p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01})) // RMC - DWD enable RMC messages
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // VGT
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})) // GRS
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})) // GST
@@ -901,6 +908,16 @@ func processNMEALine(l string) (sentenceUsed bool) {
 
 	mySituation.GPSLastValidNMEAMessageTime = stratuxClock.Time
 	mySituation.GPSLastValidNMEAMessage = l
+/*	
+	if nmeaOutPort != nil {
+		n, err := nmeaOutPort.Write([]byte(l  + "\r\n"))
+		if n == 0 || err != nil {
+			log.Printf("Can't write to nmea port")
+			nmeaOutPort.Close()
+			nmeaOutPort = nil
+		}
+	}
+*/
 
 	if x[0] == "PUBX" { // UBX proprietary message
 		if x[1] == "00" { // Position fix.
@@ -1085,6 +1102,61 @@ func processNMEALine(l string) (sentenceUsed bool) {
 
 				mySituation.muGPSPerformance.Unlock()
 			}
+			
+			// DWD 
+			if mySituation.GPSDate != ""  && 	strings.HasSuffix(x[2], ".00" )  {
+				var ddate float32 = 2000.0
+				var yr int
+				var mnth int
+				var day int
+				var magD float64
+				var rmc string
+				fmt.Sscanf(mySituation.GPSDate, "%02d%02d%02d", &day, &mnth, &yr)
+				ddate = ddate + float32(yr)  + ((float32(mnth)-1.0)/12.0)
+					rmc = fmt.Sprintf("%s %d %d %d",  mySituation.GPSDate, yr, mnth, day)
+					/*
+				if nmeaOutPort != nil {
+					n, err := nmeaOutPort.Write([]byte("date" + rmc + "\r\n"))
+					if n == 0 || err != nil {
+						log.Printf("Can't write to nmea port")
+						nmeaOutPort.Close()
+						nmeaOutPort = nil
+					}
+				}
+				* */
+
+				tt := wmm.DecimalYear(ddate)
+				loc := egm96.NewLocationGeodetic(float64(mySituation.GPSLatitude), float64(mySituation.GPSLongitude), float64(mySituation.GPSHeightAboveEllipsoid))
+
+				mag, _ := wmm.CalculateWMMMagneticField(loc, tt.ToTime())
+				magD = mag.D()
+				if magD < 0.0 {
+					mySituation.mv = fmt.Sprintf("%03.1f", magD*(-1.0))
+					mySituation.mvEW = "W"
+				} else {
+					mySituation.mv = fmt.Sprintf("%03.1f", magD)
+					mySituation.mvEW = "E"
+				}
+			
+				//log.Printf("Declination at your location: %2.2f\n", mag.D())
+				rmc = fmt.Sprintf("GPRMC,%s,A,%s,%s,%s,%s,%03.1f,%03.1f,%s,%s,%s",  
+					x[2], x[3], x[4], x[5], x[6], mySituation.GPSGroundSpeed,mySituation.GPSTrueCourse,mySituation.GPSDate, mySituation.mv, mySituation.mvEW)
+				cs_calc := byte(0)
+				for i := range rmc {
+					cs_calc = cs_calc ^ byte(rmc[i])
+				}
+				msg := fmt.Sprintf("$%s*%02X\r\n", rmc, cs_calc)
+				if nmeaOutPort != nil {
+					n, err := nmeaOutPort.Write([]byte (msg))
+					if n == 0 || err != nil {
+						log.Printf("Can't write to nmea port")
+						nmeaOutPort.Close()
+						nmeaOutPort = nil
+					}
+				}
+
+			}
+
 
 			return true
 		} else if x[1] == "03" { // satellite status message. Only the first 20 satellites will be reported in this message for UBX firmware older than v3.0. Order seems to be GPS, then SBAS, then GLONASS.
@@ -1255,6 +1327,9 @@ func processNMEALine(l string) (sentenceUsed bool) {
 			// field 3 is date
 
 			if len(x[3]) == 6 {
+				// DWD - get date for magnetic variance calculation
+				mySituation.GPSDate = x[3]
+				
 				// Date of Fix, i.e 191115 =  19 November 2015 UTC  field 9
 				gpsTimeStr := fmt.Sprintf("%s %02d:%02d:%06.3f", x[3], hr, min, sec)
 				gpsTime, err := time.Parse("020106 15:04:05.000", gpsTimeStr)
@@ -1320,7 +1395,6 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		}
 		// DWD - NMEA serial out
 		// forward to serial port
-		/*
 		if nmeaOutPort != nil {
 			n, err := nmeaOutPort.Write([]byte(l + "\r\n"))
 			if n == 0 || err != nil {
@@ -1329,11 +1403,7 @@ func processNMEALine(l string) (sentenceUsed bool) {
 				nmeaOutPort = nil
 			}
 		}
-		*/
-		// forward to udp
-		if nmeaOutConn!= nil {
-			fmt.Fprintf(nmeaOutConn, l + "\r\n")
-		}
+
 
 		// use RMC / GGA message detection to sense "NMEA" type.
 		if (globalStatus.GPS_detected_type & 0xf0) == 0 {
@@ -1462,8 +1532,8 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		
 		// DWD - NMEA serial out
 		// only send to serial port twice a second. Look for ".00" or ".050" at the end of the timestamp.
-		if (strings.HasSuffix(x[1], ".00")  || strings.HasSuffix(x[1], ".50") ) {
-			/*
+		/*
+		if strings.HasSuffix(x[1], ".00" ) {
 			if  nmeaOutPort != nil {
 				n, err := nmeaOutPort.Write([]byte(l + "\r\n"))
 				if n == 0 || err != nil {
@@ -1472,11 +1542,8 @@ func processNMEALine(l string) (sentenceUsed bool) {
 					nmeaOutPort = nil
 				}
 			}
-			*/
-			if  nmeaOutConn != nil {
-				fmt.Fprintf(nmeaOutConn, l + "\r\n")
-			}
 		}
+		* */
 		
 		// if we are receiving PUBX messages we should ignore GPRMC content		
 		if usingPUBX {
@@ -2191,7 +2258,6 @@ func initGPS() {
 	Satellites = make(map[string]SatelliteInfo)
 
 	// DWD - NMEA serial out
-	/*
 	c := &serial.Config{Name: "/dev/ttyUSB0", Baud: 9600}
 	s, err := serial.OpenPort(c)
 	if err != nil {
@@ -2200,9 +2266,9 @@ func initGPS() {
 		log.Printf("Opened /dev/ttyUSB0 for NMEA out")
 	}
 	nmeaOutPort = s
-	*/
 	
 	//conn, err := net.Dial("udp", "192.168.0.248:1234")
+	/*
 	laddr, err := net.ResolveUDPAddr("udp", "192.168.0.159:50000")
 
 	raddr := net.UDPAddr{IP: net.ParseIP("192.168.0.248"), Port: 50000}
@@ -2214,7 +2280,7 @@ func initGPS() {
 		log.Printf("Dialed dial 192.168.0.248:1234 for NMEA out")
 	}
    nmeaOutConn = conn
-
+	*/
 
 	go pollGPS()
 }
