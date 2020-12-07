@@ -11,6 +11,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"log"
 	"math"
 	"strconv"
@@ -128,8 +129,9 @@ var readyToInitGPS bool //TODO: replace with channel control to terminate gorout
 
 var Satellites map[string]SatelliteInfo
 
-// DWD - NMEA serial out
-var nmeaOutPort *serial.Port
+// DWD - NMEA serial out 
+//	var nmeaOutPort *serial.Port 
+var nmeaOutConn net.Conn
 var usingPUBX bool
 
 
@@ -1318,6 +1320,7 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		}
 		// DWD - NMEA serial out
 		// forward to serial port
+		/*
 		if nmeaOutPort != nil {
 			n, err := nmeaOutPort.Write([]byte(l + "\r\n"))
 			if n == 0 || err != nil {
@@ -1325,6 +1328,11 @@ func processNMEALine(l string) (sentenceUsed bool) {
 				nmeaOutPort.Close()
 				nmeaOutPort = nil
 			}
+		}
+		*/
+		// forward to udp
+		if nmeaOutConn!= nil {
+			fmt.Fprintf(nmeaOutConn, l + "\r\n")
 		}
 
 		// use RMC / GGA message detection to sense "NMEA" type.
@@ -1454,14 +1462,22 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		
 		// DWD - NMEA serial out
 		// only send to serial port twice a second. Look for ".00" or ".050" at the end of the timestamp.
-		if (strings.HasSuffix(x[1], ".00")  || strings.HasSuffix(x[1], ".50") ) &&  nmeaOutPort != nil {
-			n, err := nmeaOutPort.Write([]byte(l + "\r\n"))
-			if n == 0 || err != nil {
-				log.Printf("Can't write to nmea port")
-				nmeaOutPort.Close()
-				nmeaOutPort = nil
+		if (strings.HasSuffix(x[1], ".00")  || strings.HasSuffix(x[1], ".50") ) {
+			/*
+			if  nmeaOutPort != nil {
+				n, err := nmeaOutPort.Write([]byte(l + "\r\n"))
+				if n == 0 || err != nil {
+					log.Printf("Can't write to nmea port - error %v", err)
+					nmeaOutPort.Close()
+					nmeaOutPort = nil
+				}
+			}
+			*/
+			if  nmeaOutConn != nil {
+				fmt.Fprintf(nmeaOutConn, l + "\r\n")
 			}
 		}
+		
 		// if we are receiving PUBX messages we should ignore GPRMC content		
 		if usingPUBX {
 			return true
@@ -2175,14 +2191,30 @@ func initGPS() {
 	Satellites = make(map[string]SatelliteInfo)
 
 	// DWD - NMEA serial out
+	/*
 	c := &serial.Config{Name: "/dev/ttyUSB0", Baud: 9600}
 	s, err := serial.OpenPort(c)
 	if err != nil {
-        	log.Printf("Can't open /dev/ttyUSB0 for NMEA out")
+        	log.Printf("Can't open /dev/ttyUSB0 for NMEA out - error:%v", err)
 	} else {
 		log.Printf("Opened /dev/ttyUSB0 for NMEA out")
 	}
 	nmeaOutPort = s
+	*/
+	
+	//conn, err := net.Dial("udp", "192.168.0.248:1234")
+	laddr, err := net.ResolveUDPAddr("udp", "192.168.0.159:50000")
+
+	raddr := net.UDPAddr{IP: net.ParseIP("192.168.0.248"), Port: 50000}
+
+	conn, err := net.DialUDP("udp", laddr, &raddr)
+    if err != nil {
+        log.Printf("Can't dial 192.168.0.248:1234 for NMEA out - error:%v", err)
+    } else {
+		log.Printf("Dialed dial 192.168.0.248:1234 for NMEA out")
+	}
+   nmeaOutConn = conn
+
 
 	go pollGPS()
 }
