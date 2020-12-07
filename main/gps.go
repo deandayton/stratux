@@ -1122,6 +1122,7 @@ func processNMEALine(l string) (sentenceUsed bool) {
 						mySituation.mv = fmt.Sprintf("%03.1f", magD)
 						mySituation.mvEW = "E"
 					}
+					log.Printf(" Variation calc: %f %f %f -> %s %s", mySituation.GPSLatitude, mySituation.GPSLongitude, ddate, mySituation.mv, mySituation.mvEW)
 				}
 				mySituation.varCnt = mySituation.varCnt + 1
 				// reset to 0 after 10 seconds
@@ -1318,7 +1319,11 @@ func processNMEALine(l string) (sentenceUsed bool) {
 
 			if len(x[3]) == 6 {
 				// DWD - get date for magnetic variance calculation
+				if mySituation.GPSDate  == "" {
+					mySituation.varCnt = 0
+				}
 				mySituation.GPSDate = x[3]
+				
 				
 				// Date of Fix, i.e 191115 =  19 November 2015 UTC  field 9
 				gpsTimeStr := fmt.Sprintf("%s %02d:%02d:%06.3f", x[3], hr, min, sec)
