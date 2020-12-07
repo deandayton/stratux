@@ -104,8 +104,9 @@ type SituationData struct {
 	
 	// DWD - gather info required to calualte magnetic variation
 	GPSDate string  // stash the date as a string - obtained from PUBX 0 
-	mv string            // magnetic variation to be used in GPRMC 
-	mvEW string      // E or W
+	mv string       // magnetic variation to be used in GPRMC 
+	mvEW string     // E or W
+	varCnt int		// cnt to decide when magnetic variation needs to e recalculated
 }
 
 /*
@@ -139,7 +140,6 @@ var Satellites map[string]SatelliteInfo
 // DWD - NMEA serial out 
 var nmeaOutPort *serial.Port 
 //var nmeaOutConn net.Conn
-var usingPUBX bool
 
 
 /*
@@ -208,8 +208,6 @@ func initGPSSerial() bool {
 	baudrate := int(9600)
 	isSirfIV := bool(false)
 
-	// DWD - NMEA serial out
-	usingPUBX = false // default to false
 	globalStatus.GPS_detected_type = 0 // reset detected type on each initialization
 
 	if _, err := os.Stat("/dev/ublox9"); err == nil { // u-blox 8 (RY83xAI over USB).
@@ -354,9 +352,7 @@ func initGPSSerial() bool {
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GLL disabled
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GSA disabled
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // GSV disabled
-		// DWD - NMEA serial out
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // RMC
-		//p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x04, 0x00, 0x01, 0x00, 0x01, 0x00, 0x01})) // RMC - DWD enable RMC messages
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01})) // VGT
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})) // GRS
 		p.Write(makeUBXCFG(0x06, 0x01, 8, []byte{0xF0, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00})) // GST
@@ -924,10 +920,6 @@ func processNMEALine(l string) (sentenceUsed bool) {
 			if len(x) < 20 {
 				return false
 			}
-			// DWD - NMEA serial out
-			// if we are receiving PUBX Position fixes we will not process contents of GPRMC messages
-			usingPUBX = true
-
 			// set the global GPS type to UBX as soon as we see our first (valid length)
 			// PUBX,01 position message, even if we don't have a fix
 			if (globalStatus.GPS_detected_type & 0xf0) != GPS_PROTOCOL_UBX {
@@ -1104,40 +1096,39 @@ func processNMEALine(l string) (sentenceUsed bool) {
 			}
 			
 			// DWD 
-			if mySituation.GPSDate != ""  && 	strings.HasSuffix(x[2], ".00" )  {
-				var ddate float32 = 2000.0
-				var yr int
-				var mnth int
-				var day int
-				var magD float64
+			if strings.HasSuffix(x[2], ".00") || strings.HasSuffix(x[2], ".50") {
 				var rmc string
-				fmt.Sscanf(mySituation.GPSDate, "%02d%02d%02d", &day, &mnth, &yr)
-				ddate = ddate + float32(yr)  + ((float32(mnth)-1.0)/12.0)
-					rmc = fmt.Sprintf("%s %d %d %d",  mySituation.GPSDate, yr, mnth, day)
-					/*
-				if nmeaOutPort != nil {
-					n, err := nmeaOutPort.Write([]byte("date" + rmc + "\r\n"))
-					if n == 0 || err != nil {
-						log.Printf("Can't write to nmea port")
-						nmeaOutPort.Close()
-						nmeaOutPort = nil
+				
+				// periodically recalculate variation based on current position
+				if mySituation.GPSDate != ""  && mySituation.varCnt == 0 {
+					var ddate float32 = 2000.0
+					var yr int
+					var mnth int
+					var day int
+					var magD float64
+					fmt.Sscanf(mySituation.GPSDate, "%02d%02d%02d", &day, &mnth, &yr)
+					ddate = ddate + float32(yr)  + ((float32(mnth)-1.0)/12.0)
+						rmc = fmt.Sprintf("%s %d %d %d",  mySituation.GPSDate, yr, mnth, day)
+
+					tt := wmm.DecimalYear(ddate)
+					loc := egm96.NewLocationGeodetic(float64(mySituation.GPSLatitude), float64(mySituation.GPSLongitude), 0.0)
+
+					mag, _ := wmm.CalculateWMMMagneticField(loc, tt.ToTime())
+					magD = mag.D()
+					if magD < 0.0 {
+						mySituation.mv = fmt.Sprintf("%03.1f", magD*(-1.0))
+						mySituation.mvEW = "W"
+					} else {
+						mySituation.mv = fmt.Sprintf("%03.1f", magD)
+						mySituation.mvEW = "E"
 					}
 				}
-				* */
-
-				tt := wmm.DecimalYear(ddate)
-				loc := egm96.NewLocationGeodetic(float64(mySituation.GPSLatitude), float64(mySituation.GPSLongitude), float64(mySituation.GPSHeightAboveEllipsoid))
-
-				mag, _ := wmm.CalculateWMMMagneticField(loc, tt.ToTime())
-				magD = mag.D()
-				if magD < 0.0 {
-					mySituation.mv = fmt.Sprintf("%03.1f", magD*(-1.0))
-					mySituation.mvEW = "W"
-				} else {
-					mySituation.mv = fmt.Sprintf("%03.1f", magD)
-					mySituation.mvEW = "E"
+				mySituation.varCnt = mySituation.varCnt + 1
+				// reset to 0 after 10 seconds
+				// this will casue a recalcuation of variation
+				if mySituation.varCnt >= 1200 {
+					mySituation.varCnt = 0
 				}
-			
 				//log.Printf("Declination at your location: %2.2f\n", mag.D())
 				rmc = fmt.Sprintf("GPRMC,%s,A,%s,%s,%s,%s,%03.1f,%03.1f,%s,%s,%s",  
 					x[2], x[3], x[4], x[5], x[6], mySituation.GPSGroundSpeed,mySituation.GPSTrueCourse,mySituation.GPSDate, mySituation.mv, mySituation.mvEW)
@@ -1154,7 +1145,6 @@ func processNMEALine(l string) (sentenceUsed bool) {
 						nmeaOutPort = nil
 					}
 				}
-
 			}
 
 
@@ -1545,11 +1535,6 @@ func processNMEALine(l string) (sentenceUsed bool) {
 		}
 		* */
 		
-		// if we are receiving PUBX messages we should ignore GPRMC content		
-		if usingPUBX {
-			return true
-		}
-
 		// use RMC / GGA message detection to sense "NMEA" type.
 		if (globalStatus.GPS_detected_type & 0xf0) == 0 {
 			globalStatus.GPS_detected_type |= GPS_PROTOCOL_NMEA
